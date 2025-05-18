@@ -1,0 +1,625 @@
+---
+title: "pec2 AdO"
+author: "F. JAVIER MORILLA JIMÉNEZ"
+date: '`r Sys.Date()`'
+output:
+  word_document:
+    toc: true
+    toc_depth: '2'
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+    theme: cerulean
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introducción y objetivos
+
+La pandemia de COVID-19, causada por el virus SARS-CoV-2, ha generado un interés sin precedentes en la caracterización de la respuesta del huésped a la infección. En este contexto, el estudio realizado por McClain et al. utilizó secuenciación de ARN (RNA-Seq) para analizar muestras de sangre periférica de sujetos con COVID-19, comparándolas con sujetos afectados por coronavirus estacional, gripe, neumonía bacteriana y controles sanos. Los datos generados por dicho estudio están disponibles públicamente en el repositorio Gene Expression Omnibus (GEO) bajo el identificador GSE161731.
+
+El presente trabajo tiene como objetivo principal llevar a cabo un análisis de expresión génica diferencial a partir de los datos generados por McClain et al., centrándonos en tres cohortes específicas: COVID19, Bacterial y Healthy. Para ello, se realizará un análisis exhaustivo siguiendo los pasos descritos a continuación:
+
+1. **Carga de datos**: Se descargarán los datos de expresión génica desde el repositorio GEO y se cargarán en el entorno de trabajo.
+2. **Preprocesamiento**: Se llevará a cabo un preprocesamiento de los datos, que incluirá la normalización y la eliminación de genes con baja expresión.
+3. **Análisis de expresión diferencial**: Se realizará un análisis de expresión diferencial utilizando el paquete DESeq2, que es ampliamente utilizado para este tipo de análisis en datos de RNA-Seq.
+4. **Visualización de resultados**: Se generarán gráficos para visualizar los resultados del análisis de expresión diferencial, incluyendo gráficos de dispersión y mapas de calor.
+5. **Interpretación biológica**: Se llevará a cabo una interpretación biológica de los resultados obtenidos, incluyendo la identificación de vías y procesos biológicos enriquecidos en los genes diferencialmente expresados.
+6. **Conclusiones**: Se presentarán las conclusiones del análisis y se discutirán las implicaciones de los resultados en el contexto de la respuesta inmune al SARS-CoV-2.
+7. **Referencias**: Se incluirán las referencias bibliográficas relevantes para el análisis realizado.
+
+# Obtención y preparación de datos
+
+En esta sección, se procederá a la obtención de los datos de expresión génica desde el repositorio GEO y a su preparación para el análisis. Se utilizará el paquete `GEOquery` para descargar los datos y el paquete `DESeq2` para realizar el análisis de expresión diferencial.
+
+```{r}
+library(GEOquery)
+
+# Descargar los datos de expresión y metadatos
+gse <- getGEO("GSE161731", GSEMatrix = TRUE)
+expr_data <- exprs(gse[[1]])
+metadata <- pData(gse[[1]])
+expr_data
+```
+
+Se ha probado a descargar los datos directamente con el paquete `GEOquery` y el identificador GEO. Sin embargo, algo fallaba en el proceso de descarga, y la matriz de expresión estaba vacía. Así que hemos descargado directamente la matriz de expresión y los metadatos y los hemos cargado. 
+
+```{r}
+library(readr)
+
+# Cargar la matriz de expresión
+exprs_data <- read_csv("GSE161731_counts.csv.gz", col_names = TRUE)
+
+# Cargar los metadatos
+metadata <- read_csv("GSE161731_counts_key.csv.gz", col_names = TRUE)
+
+# Convertir exprs_data a data.frame 
+exprs_data <- as.data.frame(exprs_data)
+
+```
+
+Ahora, verificamos la estructura de los datos de expresión y los metadatos.
+
+```{r}
+dim(exprs_data)  
+head(exprs_data)  
+head(metadata)  
+dim(metadata)
+```
+
+Vemos que la matriz de expresión tiene 60.675 genes y 202 muestras, y la tabla de metadatos tiene 198 muestras y 9 variables. 
+
+
+Asignamos ahora los nombres de las filas de la matriz de expresión a los nombres de los genes para que sea más fácil trabajar con ellos.
+```{r}
+rownames(exprs_data) <- exprs_data[, 1]  
+head(rownames(exprs_data))
+
+```
+
+Como hemos visto antes, el número de muestras en los metadatos y en la matriz de expresión no coincide. Vamos a filtrar los datos para que contengan solo las muestras que están en ambos conjuntos de datos. 
+
+```{r}
+common_samples <- intersect(metadata$rna_id, colnames(exprs_data))
+exprs_data <- exprs_data[, common_samples]
+metadata <- metadata[metadata$rna_id %in% common_samples, ]
+head(exprs_data)
+```
+
+Ahora vemos que el objeto `exprs_data` tiene 198 columnas que corresponden con el mismo número de muestras que los metadatos.
+
+Teniendo los datos de expresión y los metadatos, vamos a crear un objeto `SummarizedExperiment` que es el formato adecuado para trabajar con datos de expresión en R.
+
+```{r}
+library(SummarizedExperiment)
+se <- SummarizedExperiment(
+    assays = list(counts = as.matrix(exprs_data)),
+    colData = metadata
+)
+assay(se, "counts")[1:10, 1:5]  
+head(colData(se))
+```
+Además, hemos verificado que el objeto `SummarizedExperiment` tiene las dimensiones correctas y que los metadatos están correctamente asignados a las muestras.
+
+Ya hemos confirmado que ambas tablas contienen los mismos genes y muestras. A continuación, vamos a usar EnsEnsDb.Hsapiens.v86 para obtener la información de los genes y añadir las coordenadas de los genes. 
+
+```{r}
+library(EnsDb.Hsapiens.v86)
+library(GenomicRanges)
+
+gene_ranges <- genes(EnsDb.Hsapiens.v86)
+head(gene_ranges)
+```
+Los datos se han extraído correctamente, así que ahora vamos a añadir la información de los genes a la tabla de expresión, asegurándonos que los nombres de los genes son los mismos en ambas tablas.
+
+```{r}
+common_genes <- intersect(rownames(exprs_data), names(gene_ranges))
+exprs_data <- exprs_data[common_genes, ]
+gene_ranges <- gene_ranges[common_genes]
+dim(exprs_data)
+```
+Verificamos que se ha hecho correctamente el filtrado de los genes y que ahora la tabla de expresión tiene 57.602 genes. 
+
+Vamos a actualizar el objeto `SummarizedExperiment` para que contenga la información de los genes, y que los genes sean equivalentes en todas las tablas
+```{r}
+se <- SummarizedExperiment(
+    assays = list(counts = as.matrix(exprs_data)),
+    colData = metadata
+)
+rowRanges(se) <- gene_ranges
+dim(se)
+
+```
+Se confirma finalmente que el objeto `SummarizedExperiment` tiene 57.602 genes y 198 muestras.
+
+# 3.	Selección de Muestras
+
+En estas sección vamos a llevar a cabo la selección de las muestras que vamos a usar para el análisis. Vamos a filtrar las muestras para que contengan solo las muestras de los grupos COVID19, Bacterial y Healthy. Eliminamos también individuos duplicados, y convertimos las variables al formato adecuado. 
+Además, vamos a seleccionar un conjunto de 75 muestras , utilizando una semilla aleatoria para garantizar la reproducibilidad del análisis.
+
+
+Empezamos filtrando las muestras para que contengan solo los grupos de interés, y que no haya duplicados. También convertimos las variables al formato adecuado, y sustituimos caracteres como espacios, guiones,  puntos, barras, etc., por guiones bajos para evitar problemas con los nombres de las variables.
+
+```{r}
+table(metadata$cohort)
+```
+
+
+```{r}
+library(dplyr)
+
+# Filtrar las muestras para que contengan solo los grupos de interés
+filtered_metadata <- metadata %>%
+    filter(cohort %in% c("COVID-19", "Bacterial", "healthy")) %>%
+    distinct(rna_id, .keep_all = TRUE)
+# Convertir las variables al formato adecuado
+filtered_metadata$cohort <- as.factor(filtered_metadata$cohort)
+filtered_metadata$gender <- as.factor(filtered_metadata$gender)
+filtered_metadata$age <- as.numeric(filtered_metadata$age)
+
+# Sustituir caracteres especiales por guiones bajos
+filtered_metadata <- filtered_metadata %>%
+    mutate(across(everything(), ~ gsub("[[:punct:]]", "_", .))) %>%
+    mutate(across(everything(), ~ gsub(" ", "_", .))) %>%
+    mutate(across(everything(), ~ gsub("/", "_", .))) %>%
+    mutate(across(everything(), ~ gsub("\\\\", "_", .)))
+colnames(exprs_data) <- colnames(exprs_data) %>%
+    gsub("[[:punct:]]", "_", .) %>%
+    gsub(" ", "_", .) %>%
+    gsub("/", "_", .) %>%
+    gsub("\\\\", "_", .)
+
+
+# Verificar la estructura de los metadatos filtrados
+head(filtered_metadata)
+dim(filtered_metadata)
+```
+
+
+Como podemos ver, tras la selección y procesamiento, hemos obtenido la reducción a un total de 120 muestras.
+
+Ahora vamos a seleccionar un subconjunto de 75 muestras aleatorias para el análisis. Para ello, vamos a usar la función `sample` de R, y vamos a establecer una semilla aleatoria para garantizar la reproducibilidad del análisis.
+
+```{r}
+myseed <- sum(utf8ToInt("franciscojaviermorillajimenez"))
+set.seed(myseed)
+
+# Seleccionar un subconjunto de 75 muestras aleatorias
+selected_samples <- sample(unique(filtered_metadata$rna_id), 75)
+# Filtrar los metadatos para que contengan solo las muestras seleccionadas
+filtered_metadata <- filtered_metadata %>%
+    filter(rna_id %in% selected_samples)
+# Filtrar la matriz de expresión para que contenga solo las muestras seleccionadas
+filtered_exprs_data <- exprs_data[, colnames(exprs_data) %in% filtered_metadata$rna_id]
+# Verificar la estructura de los metadatos filtrados
+head(filtered_metadata)
+dim(filtered_metadata)
+# Verificar la estructura de la matriz de expresión filtrada
+head(filtered_exprs_data)
+dim(filtered_exprs_data)
+```
+
+# 4.	Preprocesado y Normalización
+
+En esta sección, vamos a llevar a cabo el preprocesado y la normalización de los datos de expresión. Vamos a realizar la normalización mediante TPMS (Transcripts Per Million) y vamos a filtrar los genes con baja expresión.
+
+Empezamos filtrando los genes con baja expresión. Es común usar un criterio de expresión mínima para filtrar los genes que tienen bajo conteo en la mayoría de las muestras. En este caso, vamos a usar un umbral de 10 conteos en al menos el 50% de las muestras.
+
+```{r}
+# Filtrar los genes con baja expresión
+filtered_exprs_data <- filtered_exprs_data[rowSums(filtered_exprs_data > 10) >= (0.5 * ncol(filtered_exprs_data)), ]
+dim(filtered_exprs_data)
+```
+Así, hemos pasado de 57.602 genes a 16.000 genes, lo que es un número razonable para el análisis posterior.
+
+vamos a actualizar el objeto `SummarizedExperiment` para que contenga solo los genes filtrados y las muestras seleccionadas.
+
+```{r}
+# Actualizar el objeto SummarizedExperiment
+se <- SummarizedExperiment(
+    assays = list(counts = as.matrix(filtered_exprs_data)),
+    colData = filtered_metadata
+)
+rowRanges(se) <- gene_ranges[gene_ranges$gene_id %in% rownames(filtered_exprs_data)]
+# Verificar
+dim(se)
+```
+
+Filtrados los genes, vamos a aplicar la normalización mediante el método de TPM (Transcripts Per Million). Este método normaliza los datos de expresión teniendo en cuenta la longitud de los genes y el número total de lecturas en cada muestra.
+La fórmula que se utiliza para calcular los TPM es la siguiente:
+$$TPM = \frac{(conteo \, de \, lecturas \, del \, gen) / (longitud \, del \, gen)}{(suma \, de \, todos \, los \, conteos \, de \, lecturas) / (longitud \, total)} * 10^6$$
+Donde la longitud del gen se expresa en kilobases (kb) y el número total de lecturas se expresa en millones.
+
+Para aplicar la normalización TPM, vamos a calcular la longitud de los genes y luego aplicar la fórmula anterior. Vamos a usar el paquete `edgeR` para calcular la longitud de los genes y normalizar los datos.
+
+```{r}
+library(edgeR)
+# Calcular la longitud de los genes
+gene_lengths <- width(rowRanges(se))
+rpk <- filtered_exprs_data / (gene_lengths / 1000)  # Dividir por longitud en kb
+scaling_factor <- colSums(rpk) / 1e6  # Escalar por millón de RPKs
+tpm <- sweep(rpk, 2, scaling_factor, FUN = "/")  # Dividir cada columna por el factor de escal
+assays(se, withDimnames=FALSE)[["TPM"]] <- tpm
+```
+
+Confirmamos que se ha añadido la matriz de TPM al objeto `SummarizedExperiment` y que tiene las dimensiones correctas.
+
+```{r}
+# Verificar la matriz de TPM
+assayNames(se) 
+assay(se, "TPM")[1:10, 1:5]  
+assay(se, "counts")[1:10, 1:5]  
+dim(assay(se, "TPM"))  
+```
+
+
+# 5.	Análisis Exploratorio de Datos
+
+En esta sección, vamos a llevar a cabo un análisis exploratorio de los datos. Vamos a realizar un análisis de componentes principales (PCA) y MDS para visualizar la variabilidad de los datos y la relación entre las muestras. Además, vamos a llevar a cabo un análisis de agrupamiento jerárquico (HCA) para visualizar la variabilidad de los datos y la relación entre las muestras, y un mapa de calor. 
+Como objetivo final de esta sección, vamos a identificar las variables confusoras que pueden influir en el análisis de expresión diferencial.
+
+```{r}
+library(ggplot2)
+library(SummarizedExperiment)
+
+# 1. Extraer matriz de expresión TPM y metadatos filtrados
+tpm_mat <- assay(se, "TPM")
+meta <- colData(se)
+
+# 2. PCA
+pca <- prcomp(t(tpm_mat), center = TRUE, scale. = TRUE)
+pca_df <- as.data.frame(pca$x)
+pca_df$sample <- rownames(pca_df)
+pca_df$cohort <- meta$cohort[match(pca_df$sample, rownames(meta))]
+pca_df$gender <- meta$gender[match(pca_df$sample, rownames(meta))]
+pca_df$age <- meta$age[match(pca_df$sample, rownames(meta))]
+
+# 3. Gráfico PCA
+ggplot(pca_df, aes(x = PC1, y = PC2, color = cohort)) +
+  geom_point(size = 3) +
+  labs(title = "PCA de expresión génica", x = "PC1", y = "PC2") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# 4. MDS
+mds <- cmdscale(dist(t(tpm_mat)), k = 2)
+mds_df <- as.data.frame(mds)
+mds_df$sample <- rownames(mds_df)
+mds_df$cohort <- meta$cohort[match(mds_df$sample, rownames(meta))]
+mds_df$gender <- meta$gender[match(mds_df$sample, rownames(meta))]
+mds_df$age <- meta$age[match(mds_df$sample, rownames(meta))]
+
+# 5. Gráfico MDS
+ggplot(mds_df, aes(x = V1, y = V2, color = cohort)) +
+  geom_point(size = 3) +
+  labs(title = "MDS de expresión génica", x = "Dimension 1", y = "Dimension 2") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+La visualización del PCA por cohort nos permite evaluar si las muestras se agrupan según las características biológicas. Si observamos una separación clara, podemos inferir que la expresión génica está influenciada por el grupo de estudio.
+Tanto el análisis de componentes principales (PCA) como el escalado multidimensional (MDS) sugieren que existe una separación entre las tres cohortes (Bacterial, COVID_19 y healthy) en los datos de expresión génica. En ambas visualizaciones, las muestras bacterianas tienden a agruparse de manera diferenciada, mientras que las muestras COVID_19 y healthy aparecen algo más próximas entre sí, aunque siguen mostrando cierta distinción. Estos resultados podrían indicar diferencias en los perfiles de expresión génica entre los grupos. 
+
+Vamos a verificar si hay otras variables que pueden influir en el análisis de expresión diferencial. Para ello, hacemos el PCA con las variables `gender` y `age` para ver si hay alguna separación clara entre las muestras.
+
+```{r}
+ggplot(pca_df, aes(x = PC1, y = PC2, color = age)) +
+  geom_point(size = 3) +
+  labs(title = "PCA coloreado por edad") +
+  theme_minimal()
+
+```
+
+```{r}
+ggplot(pca_df, aes(x = PC1, y = PC2, color = gender)) +
+  geom_point(size = 3) +
+  labs(title = "PCA coloreado por género") +
+  theme_minimal()
+
+```
+
+Ninguna de las dos variables parece influir en el análisis de expresión diferencial, ya que no hay una separación clara entre las muestras. Vamos a ver cuales son la sdemas variables disponibles en los metadatos.
+```{r}
+colnames(filtered_metadata)
+```
+Vemos que hay una variable `cohort` que es la que hemos usado para el análisis, y las variables `gender` y `age` que ya hemos analizado. Además, hay otras variables como `hospitalized`, `batch`, `race`, etc. Vamos a ver si alguna de estas variables puede influir en el análisis de expresión diferencial.
+
+```{r}
+tpm_mat <- assay(se, "TPM")
+meta <- colData(se)
+
+# Realizar PCA
+pca <- prcomp(t(tpm_mat), center = TRUE, scale. = TRUE)
+pca_df <- as.data.frame(pca$x)
+pca_df$sample <- rownames(pca_df)
+pca_df$hospitalized <- meta$hospitalized[match(pca_df$sample, rownames(meta))]
+pca_df$race <- meta$race[match(pca_df$sample, rownames(meta))]
+pca_df$batch <- meta$batch[match(pca_df$sample, rownames(meta))]
+
+# Visualización coloreada por hospitalización
+ggplot(pca_df, aes(x = PC1, y = PC2, color = hospitalized)) +
+  geom_point(size = 3) +
+  labs(title = "PCA coloreado por hospitalización", x = "PC1", y = "PC2") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# Visualización coloreada por raza
+ggplot(pca_df, aes(x = PC1, y = PC2, color = race)) +
+  geom_point(size = 3) +
+  labs(title = "PCA coloreado por raza", x = "PC1", y = "PC2") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# Visualización coloreada por batch (lote experimental)
+ggplot(pca_df, aes(x = PC1, y = PC2, color = batch)) +
+  geom_point(size = 3) +
+  labs(title = "PCA coloreado por batch", x = "PC1", y = "PC2") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+Tampoco parecen influir de manera significativa en el análisis, así que no se toman en cuenta para el análisis de expresión diferencial.
+
+Ahora vamos a realizar un análisis de agrupamiento jerárquico (HCA) para visualizar la agrupación entre los datos. Vamos a usar la función `hclust` de R para realizar el análisis de agrupamiento jerárquico, y vamos a graficar el dendrograma resultante.
+
+```{r}
+# Calcular la matriz de distancias
+dist_matrix <- dist(t(assay(se, "TPM")), method = "euclidean")
+# Realizar el análisis de agrupamiento jerárquico
+hclust_result <- hclust(dist_matrix, method = "ward.D2")
+# Graficar el dendrograma
+plot(hclust_result, labels = filtered_metadata$cohort, main = "Dendrograma de agrupamiento jerárquico", xlab = "", sub = "")
+# Graficar el dendrograma con colores
+library(dendextend)
+dend <- as.dendrogram(hclust_result)
+dend <- color_branches(dend, k = 3)
+plot(dend, main = "Dendrograma de agrupamiento jerárquico", xlab = "", sub = "")
+```
+En el primer clustering jerárquico, se ha detectado 1 muestra que podría separarse del resto. Por ello, en el culstering de colores, se selecciona un valor de k de 3 para ver si se separa esta. Efectivamente, vemos como la muestra se separa del resto.
+Vamos a identificar qué muestra es la que se separa del resto. Para ello, vamos a obtener las alturas de los nodos del clustering y a extraer los nodos que superan un umbral alto.
+
+```{r}
+heights <- hclust_result$height
+threshold <- quantile(heights, 0.99)
+outlier_indices <- which(heights > threshold)
+print(data.frame(merge = outlier_indices, height = heights[outlier_indices]))
+
+k <- 3
+clust <- cutree(hclust_result, k = k)
+cluster_sizes <- table(clust)
+outlier_cluster <- as.numeric(names(cluster_sizes)[which.min(cluster_sizes)])
+outlier_samples <- names(clust)[clust == outlier_cluster]
+print(outlier_samples)
+
+plot(hclust_result, labels = filtered_metadata$cohort, main = "Dendrograma jerárquico", xlab = "", sub = "")
+rect.hclust(hclust_result, k = k, border = c("grey", "grey", "red")[1:k])
+
+
+```
+Vemos que la muestra que se separa del resto es la muestra "94478". vamos a extraer la información de esta muestra de los metadatos para ver qué información tenemos de ella.
+
+```{r}
+outlier_sample <- filtered_metadata[filtered_metadata$rna_id == outlier_samples, ]
+print(outlier_sample)
+
+```
+Se corresponde con una muestra Bacterial de una mujer de 68 años. Vamos a eliminar esta muestra del objeto SE.
+
+```{r}
+se <- se[, !colnames(se) %in% outlier_samples]
+dim(se)
+```
+Se confirma que se ha eliminado la muestra del objeto `SummarizedExperiment`, ya que ahora tiene 74 muestras en lugar de 75. 
+
+
+
+
+
+# 6. Análisis de Expresión Diferencial
+
+En esta sección, vamos a llevar a cabo el análisis de expresión diferencial. Para llevar a cabo un análisis de expresión diferencial de RNA-seq en R, existen varios enfoques, entre los que destacan `edgeR`, `DESeq2` y `limma`. La diferencia entre ellos radica principalmente en la forma en que modelan los datos y en los métodos de normalización que utilizan. Para seleccionar el método de análisis, vamos a usar una semilla aleatoria para seleccionar uno de los métodos disponibles.
+
+```{r}
+set.seed(myseed)
+sample(c("edgeR", "voom+limma", "DESeq2"), size = 1)
+```
+En este caso ha tocado usar el método `edgeR`, que es un método de análisis de expresión diferencial basado en la teoría de modelos lineales generalizados. Este método es adecuado para datos de RNA-seq y tiene en cuenta la variabilidad biológica y técnica en los datos.
+
+Para empezar, vamos a construir la matriz de diseño y las matrices de contrastes adecuadas para evaluar la expresión génica diferencial en las comparaciones Bacterial vs healthy y COVID19 vs healthy. Como hemos visto en el análisis exploratorio de datos, la variable `cohort` es la que nos interesa, y vamos a usarla como variable de interés. Además, vamos a incluir las variables `gender` y `age` como variables confusoras en el análisis.
+```{r}
+media_edad <- mean(colData(se)$age, na.rm = TRUE)
+media_edad
+```
+Calculamos la media de edad para asignarla a una muestra que tiene el valor de edad faltante. Creamos ya la matriz de diseño y la matriz de contrastes.
+
+```{r}
+library(edgeR)
+library(limma)
+# Definir healthy como el grupo de referencia
+colData(se)$age[is.na(colData(se)$age)] <- 41
+colData(se)$cohort <- relevel(factor(colData(se)$cohort), ref = "healthy")
+colData(se)$age <- as.numeric(as.character(colData(se)$age))
+design <- model.matrix(~ cohort + gender + age, data = colData(se))
+
+head(design)
+```
+
+```{r}
+# Definir los contrastes
+contrast_matrix <- makeContrasts(
+  Bacterial_vs_Healthy = cohortBacterial,
+  COVID19_vs_Healthy = cohortCOVID_19,
+  levels = design
+)
+
+contrast_matrix
+
+```
+Ya que tenemos el diseño y los contrastes definidos, vamos a realizar el análisis de expresión diferencial utilizando el método `edgeR`. Como se vio, tenemos los datos normalizados y con las muestras seleccionadas de manera aleatoria en el assay "TPM". Vamos a crear el objeto `DGEList` a partir del objeto `SummarizedExperiment` y a realizar el análisis de expresión diferencial.
+
+Para seleccionar los genes diferencialmente expresados, vamos a usar un umbral de significación estadística de 0.05 y un umbral de log2FC de 1.5. El umbral del valor de 0.05 de FDR selecciona genes con significancia desde el punto de vista estadístico, mientras que el log2FC de 1.5 selecciona genes con significancia biológica.
+```{r}
+# Crear el objeto DGEList
+dge <- DGEList(counts = assay(se, "counts"), group = colData(se)$cohort)
+# Normalizar los datos
+dge <- calcNormFactors(dge)
+# Ajustar el modelo
+dge <- estimateDisp(dge, design)
+fit <- glmQLFit(dge, design)
+# Realizar el análisis de expresión diferencial
+qlf <- glmQLFTest(fit, contrast = contrast_matrix)
+# Obtener los resultados
+results <- topTags(qlf, n = Inf)
+head(results$table)
+```
+Ahora que tenemos los resultados del análisis de expresión diferencial, vamos a filtrar los genes diferencialmente expresados utilizando el umbral de significación estadística y el umbral de log2FC. Vamos a usar un umbral de 0.05 para el valor de FDR y un umbral de 1.5 para el log2FC.
+
+```{r}
+# Filtrar los genes diferencialmente expresados
+results_filtered_BACTERIAL <- results$table[results$table$FDR < 0.05 & abs(results$table$logFC.Bacterial_vs_Healthy
+) > 1.5, ]
+
+results_filtered_COVID19 <- results$table[results$table$FDR < 0.05 & abs(results$table$logFC.COVID19_vs_Healthy
+) > 1.5, ]
+
+head(results_filtered_BACTERIAL)
+
+```
+
+```{r}
+head(results_filtered_COVID19)
+```
+
+Para terminar el análisis de expresión diferencial, vamos a comparar los resultados de ambos contrastes usando Upset plots, que son una forma de visualizar la intersección entre conjuntos de datos. Vamos a usar el paquete `ComplexUpset` para crear los gráficos, usando la lista de genes diferencialmente expresados de cada contraste, creando un nuevo dataframe con la presencia/ausencia de genes en cada contraste, y usándolo para crear el gráfico. 
+
+
+```{r}
+library(ComplexUpset)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+# Crear listas de genes diferencialmente expresados
+genes_Bacterial <- rownames(results_filtered_BACTERIAL)
+genes_COVID19 <- rownames(results_filtered_COVID19)
+
+# Crear un dataframe con presencia/ausencia de genes
+upset_data <- data.frame(
+  Gene = unique(c(genes_Bacterial, genes_COVID19)),  # Lista única de genes
+  Bacterial = as.integer(unique(c(genes_Bacterial, genes_COVID19)) %in% genes_Bacterial),
+  COVID19 = as.integer(unique(c(genes_Bacterial, genes_COVID19)) %in% genes_COVID19)
+)
+
+# Crear el gráfico UpSet
+upset(
+  upset_data,
+  intersect = c("Bacterial", "COVID19"),  # Cambiar `sets=` por `intersect=`
+  mode = "distinct",  # Definir el modo correcto
+  base_annotations = list(
+    'Intersection Size' = intersection_size()
+  )
+)
+
+```
+
+Gracias al gráfico UpSet, podemos ver que hay un número significativo de genes que son diferencialmente expresados en ambos contrastes llegando a 150 genes comunes, lo que sugiere que hay una superposición en los perfiles de expresión génica entre las muestras Bacterial y COVID19. Esto podría indicar que hay mecanismos biológicos comunes de respuesta a infección en ambos grupos.
+
+# 7. Análisis de sobrerepresentación
+
+Por último, llevamos a cabo el análisis de sobrerepresentación para identificar las funciones enriquecidas entre los genes sobreexpresados en pacientes con COVID19 en comparación con los controles sanos. Para ello, vamos a usar el paquete `clusterProfiler` y la base de datos `org.Hs.eg.db` para realizar el análisis de enriquecimiento de GO. Vamos a usar la función `enrichGO` para realizar el análisis y luego vamos a filtrar los resultados para obtener solo los términos significativos.
+
+En este análisis se busca obtener información sobre los procesos biológicos que están alterados en los pacientes con COVID19 en comparación con los controles sanos. Para ello, se seleccionan los genes diferencialmente expresados en el contraste COVID19 vs healthy, y se usa como background la lista de genes presentes en la matriz de expresión de la cohorte healthy.
+```{r}
+library(clusterProfiler)
+library(org.Hs.eg.db)
+
+# Seleccionar muestras de la cohorte Healthy y extraer la matriz de expresión
+samples_healthy <- colnames(se)[colData(se)$cohort == "healthy"]
+tpm_healthy <- assay(se, "TPM")[, samples_healthy]
+
+# Convertir los nombres de los genes a IDs de Entrez
+gene_ids <- rownames(tpm_healthy)
+entrez_ids <- mapIds(org.Hs.eg.db, keys = gene_ids, column = "ENTREZID", keytype = "ENSEMBL", multiVals = "first")
+gene_ids_covid19 <- mapIds(org.Hs.eg.db, keys = rownames(results_filtered_COVID19), column = "ENTREZID", keytype = "ENSEMBL", multiVals = "first")
+
+# Realizar el análisis de enriquecimiento de GO
+go_results <- enrichGO(
+  gene = gene_ids_covid19,
+  universe = entrez_ids,
+  OrgDb = org.Hs.eg.db,
+  keyType = "ENTREZID",
+  ont = "BP",  # Usar solo el dominio de Biológico
+  pAdjustMethod = "BH",
+  qvalueCutoff = 0.05,
+  readable = TRUE
+)
+
+# Filtrar los resultados para obtener solo los términos significativos
+go_results_filtered <- go_results[go_results$qvalue < 0.05, ]
+```
+
+Vamos a visualizar los términos obtenidos en un dotplot que nos permita ver la significancia de los términos y el número de genes asociados a cada uno de ellos.
+
+```{r}
+library(enrichplot)
+
+# Dotplot
+dotplot(go_results, showCategory = 20) + 
+  ggtitle("Top 20 Términos de GO (Biological Process) - COVID-19 vs Healthy")
+```
+
+También podemos visualizar los resultados en un heatmap para ver la relación entre los términos y los genes asociados a cada uno de ellos. 
+
+```{r}
+go_results_filtered
+heatplot(go_results, foldChange = NULL)
+```
+
+De esta tabla podemos obtener los términos GO y sus procesos biológicos celulares relacionados. Se  revela una serie de procesos biológicos enriquecidos que ofrecen una posible explicación sobre los mecanismos afectados por la enfermedad. Dentro de los términos más destacados, encontramos funciones relacionadas con la traducción citoplasmática, el transporte de electrones, la fosforilación oxidativa y la regulación de la apoptosis. Sin embargo, es importante evaluar críticamente si estos hallazgos son consistentes con lo que se conoce sobre la fisiopatología de COVID-19 y cómo pueden estar influenciados por la naturaleza del análisis.
+
+Uno de los principales hallazgos es la activación de la traducción citoplasmática, lo cual es coherente con la biología del virus SARS-CoV-2. Dado que los virus dependen de la maquinaria celular para replicarse, es lógico que las células infectadas aumenten la producción de proteínas. Este proceso podría estar impulsado no solo por la replicación viral, sino también por una respuesta celular a la infección, en la cual se sintetizan proteínas involucradas en inmunidad y reparación del daño (de Breyne et al., 2020). Sin embargo, estudios previos han sugerido que el virus también tiene mecanismos para secuestrar la traducción y evitar la síntesis de proteínas antivirales, por lo que sería interesante evaluar si esta activación de traducción citoplasmática se observa en células infectadas directamente o en células inmunitarias que responden al virus (Zhang et al., 2022).
+
+Otro grupo de términos enriquecidos está relacionado con la producción de energía y el transporte de electrones mitocondrial. La síntesis de ATP acoplada al transporte de electrones y la fosforilación oxidativa son procesos esenciales para la función celular, y su alteración puede estar relacionada con el daño mitocondrial reportado en pacientes con COVID-19 severo (Molnar et al., 2024). La sobre-representación de estos términos podría sugerir que las células afectadas intentan compensar el daño mitocondrial, incrementando la actividad energética para responder al estrés celular. Sin embargo, algunas investigaciones han indicado que el virus puede inducir disfunción mitocondrial, lo que afectaría la producción de ATP en ciertas células inmunitarias (Noonong et al., 2023). Esto genera una posible contradicción: si el daño mitocondrial es severo, esperaríamos una reducción en la fosforilación oxidativa en lugar de un aumento.
+
+Finalmente, los resultados muestran términos relacionados con la regulación de apoptosis y la señalización por p53, lo que sugiere una activación de mecanismos de muerte celular programada. La vía de p53 es una de las principales reguladoras de la apoptosis en respuesta al daño celular, y su activación podría estar asociada con el estrés oxidativo, el daño al ADN y la inflamación generada por la infección viral (Wang et al., 2023). Sin embargo, algunos estudios han sugerido que el virus inhibe la apoptosis en células infectadas para prolongar su replicación, lo que plantea la posibilidad de que este enriquecimiento se deba a células inmunitarias activadas en lugar de células directamente infectadas (El-Deiry & Zhang, 2024).
+
+En conclusión, los resultados del análisis de sobrerepresentación reflejan varios procesos biológicos que tienen sentido en el contexto de COVID-19, pero también presentan algunas inconsistencias que deben evaluarse con más detalle. La activación de la traducción, el metabolismo energético y la apoptosis son características esperables en respuesta a la infección, pero es posible que estos efectos sean heterogéneos entre diferentes tipos celulares. 
+
+
+
+# 8. Conclusiones
+
+En este trabajo hemos llevado a cabo un análisis de expresión diferencial a partir de los datos generados por McClain et al. (2021) en el estudio de la respuesta inmune al SARS-CoV-2. Hemos realizado un análisis exhaustivo siguiendo los pasos descritos en la introducción, y hemos obtenido los siguientes resultados:
+- Hemos filtrado los datos de expresión y hemos seleccionado un subconjunto de 75 muestras aleatorias para el análisis.
+- Hemos realizado un análisis exploratorio de los datos mediante PCA, MDS y HCA, y hemos identificado las variables confusoras que pueden influir en el análisis de expresión diferencial.
+- Hemos llevado a cabo un análisis de expresión diferencial utilizando el método `edgeR`, y hemos obtenido un número significativo de genes diferencialmente expresados en los contrastes Bacterial vs healthy y COVID19 vs healthy.
+- Hemos visualizado los resultados del análisis de expresión diferencial y el análisis de enriquecimiento de GO mediante gráficos y heatmaps.
+- Hemos identificado un número significativo de genes que son diferencialmente expresados en ambos contrastes, lo que sugiere que hay una superposición en los perfiles de expresión génica entre las muestras Bacterial y COVID19.
+- Hemos identificado un número significativo de términos enriquecidos en los genes diferencialmente expresados, lo que sugiere que hay procesos biológicos alterados en los pacientes con COVID19 en comparación con los controles sanos.
+
+Los resultados de este análisis son coherentes con lo que se conoce sobre la fisiopatología de COVID-19, pero también presentan algunas inconsistencias que deben evaluarse con más detalle. En general, los resultados sugieren que hay una activación de la traducción, el metabolismo energético y la apoptosis en respuesta a la infección, pero es posible que estos efectos sean heterogéneos entre diferentes tipos celulares.
+
+# 9. Referencias
+
+- de Breyne, S., Vindry, C., Guillin, O., et al. (2020). Translational control of coronaviruses. Nucleic Acids Research, 48(22), 12502–12522. https://doi.org/10.1093/nar/gkaa601
+
+- El-Deiry, W. S., & Zhang, S. (2024). SARS-CoV-2 spike protein disrupts p53 tumor suppressor pathway. Oncotarget, 15. https://doi.org/10.18632/oncotarget.28576
+
+- Molnar, T., Lehoczki, A., Fekete, M., et al. (2024). Mitochondrial dysfunction in long COVID: mechanisms, consequences, and potential therapeutic approaches. GeroScience, 46, 5267–5286. https://doi.org/10.1007/s11357-024-01165-5
+
+- Noonong, K., Chatatikun, M., Surinkaew, S., et al. (2023). Mitochondrial oxidative stress, mitochondrial ROS storms in long COVID pathogenesis. Frontiers in Immunology, 14, 1275001. https://doi.org/10.3389/fimmu.2023.1275001
+
+- Wang, X., Liu, Y., Li, K., & Hao, Z. (2023). Roles of p53-mediated host–virus interaction in coronavirus infection. International Journal of Molecular Sciences, 24(7), 6371. https://doi.org/10.3390/ijms24076371
+
+- Zhang, D., Zhu, L., Wang, Y., et al. (2022). Translational control of COVID-19 and its therapeutic implication. Frontiers in Immunology, 13, 857490. https://doi.org/10.3389/fimmu.2022.857490
+
+
+
+
+
+
+
+
+
